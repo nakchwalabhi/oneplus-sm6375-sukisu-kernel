@@ -1,0 +1,93 @@
+name: Build SukiSU kernel (OnePlus Nord CE 2 Lite 5G / sm6375)
+
+on:
+  workflow_dispatch:
+    inputs:
+      susfs:
+        description: 'Also apply SUSFS (root hiding + uname spoof)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      KERNEL_DIR: ${{ github.workspace }}/kernel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex git gnupg gperf \
+            liblz4-tool libncurses5-dev libssl-dev libxml2 libxml2-utils lzop rsync \
+            squashfs-tools xsltproc zip zlib1g-dev lld python3 patch \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+          df -h
+
+      - name: Clone LineageOS sm6375 kernel
+        run: |
+          git clone https://github.com/LineageOS/android_kernel_oneplus_sm6375.git \
+            -b lineage-23.2 --depth=1 "$KERNEL_DIR"
+
+      - name: Add SukiSU Ultra (builtin) + manual hooks
+        run: |
+          cd "$KERNEL_DIR"
+          git clone --depth 1 -b builtin https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
+          ln -sfn "$(realpath --relative-to="$KERNEL_DIR/drivers" "$KERNEL_DIR/KernelSU/kernel")" "$KERNEL_DIR/drivers/kernelsu"
+          grep -q 'kernelsu' drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          git apply -p1 "$GITHUB_WORKSPACE/patches/0001-ksu-manual-hook.patch"
+          printf 'CONFIG_KSU=y\nCONFIG_KSU_FEATURE_ADBROOT=y\n# CONFIG_KSU_DEBUG is not set\n# CONFIG_KPM is not set\n' > "$KERNEL_DIR/ksu_defconfig.fragment"
+          echo "[i] SukiSU commit: $(git -C KernelSU rev-parse --short HEAD)"
+
+      - name: Download proton-clang
+        run: git clone https://github.com/kdrag0n/proton-clang.git --depth=1 "$HOME/proton-clang"
+
+      - name: Build kernel
+        run: |
+          cd "$KERNEL_DIR"
+          export PATH="$HOME/proton-clang/bin:$PATH"
+          MAKE_ARGS="ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu-"
+          make $MAKE_ARGS vendor/holi-qgki_defconfig
+          cat ksu_defconfig.fragment >> out/.config
+          make $MAKE_ARGS olddefconfig
+          grep -q '^CONFIG_KSU=y' out/.config || { echo 'ERROR: CONFIG_KSU missing'; exit 1; }
+          make $MAKE_ARGS -j"$(nproc)" \
+            KCFLAGS="-Wno-error -Wno-error=format -Wno-error=implicit-fallthrough" \
+            2>&1 | tee build.log
+
+      - name: Package AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "$GITHUB_WORKSPACE/anykernel"
+          cd "$GITHUB_WORKSPACE/anykernel"
+          rm -rf .git
+          sed -i 's|^kernel.string=.*|kernel.string=SukiSU Ultra (sm6375)|' anykernel.sh
+          sed -i 's|^device.name1=.*|device.name1=oscaro|' anykernel.sh
+          sed -i 's|^block=.*|block=boot;|' anykernel.sh
+          sed -i 's|^is_slot_device=.*|is_slot_device=auto;|' anykernel.sh
+          IMG=$(find "$KERNEL_DIR/out/arch/arm64/boot" -maxdepth 1 -name 'Image.gz' -print -quit)
+          [ -n "$IMG" ] || IMG=$(find "$KERNEL_DIR/out/arch/arm64/boot" -maxdepth 1 -name 'Image' -print -quit)
+          cp "$IMG" "$GITHUB_WORKSPACE/anykernel/"
+          zip -r9 "$GITHUB_WORKSPACE/AnyKernel3_SukiSU_sm6375.zip" . -x '*.zip' 'README*'
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: suksisu-sm6375-${{ github.run_number }}
+          path: |
+            AnyKernel3_SukiSU_sm6375.zip
+            kernel/out/arch/arm64/boot/Image*
+            kernel/build.log

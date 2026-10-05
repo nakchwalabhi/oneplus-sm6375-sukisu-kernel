@@ -2,11 +2,6 @@ name: Build SukiSU kernel (OnePlus Nord CE 2 Lite 5G / sm6375)
 
 on:
   workflow_dispatch:
-    inputs:
-      susfs:
-        description: 'Also apply SUSFS (root hiding + uname spoof)'
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -37,19 +32,15 @@ jobs:
           git clone https://github.com/LineageOS/android_kernel_oneplus_sm6375.git \
             -b lineage-23.2 --depth=1 "$KERNEL_DIR"
 
-      - name: Add SukiSU Ultra (builtin) + manual hooks
+      - name: Add SukiSU Ultra (main)
         run: |
           set -euo pipefail
           cd "$KERNEL_DIR"
-          git clone --depth 1 -b builtin https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
+          git clone --depth 1 -b main https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
           ln -sfn "$(realpath --relative-to="$KERNEL_DIR/drivers" "$KERNEL_DIR/KernelSU/kernel")" "$KERNEL_DIR/drivers/kernelsu"
           grep -q 'kernelsu' drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
           grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-          git apply -p1 "$GITHUB_WORKSPACE/patches/0001-ksu-manual-hook.patch"
-          # NOTE: KSU_SUSFS defaults to y in the builtin branch, which pulls in
-          # <linux/susfs.h> from the (not-yet-applied) SUSFS patch. Disable it for
-          # this base build so the classic manual-hook variant is used.
-          printf 'CONFIG_KSU=y\n# CONFIG_KSU_SUSFS is not set\nCONFIG_KSU_FEATURE_ADBROOT=y\n# CONFIG_KSU_DEBUG is not set\n# CONFIG_KPM is not set\n' > "$KERNEL_DIR/ksu_defconfig.fragment"
+          printf 'CONFIG_KSU=y\nCONFIG_EXT4_FS=y\n# CONFIG_KSU_DEBUG is not set\n# CONFIG_KPM is not set\n' > "$KERNEL_DIR/ksu_defconfig.fragment"
           echo "[i] SukiSU commit: $(git -C KernelSU rev-parse --short HEAD)"
 
       - name: Download proton-clang
@@ -69,8 +60,6 @@ jobs:
           cat ksu_defconfig.fragment >> out/.config
           make $MAKE_ARGS olddefconfig
           grep -q '^CONFIG_KSU=y' out/.config || { echo 'ERROR: CONFIG_KSU missing'; exit 1; }
-          grep -q '^# CONFIG_KSU_SUSFS is not set' out/.config || echo 'WARN: KSU_SUSFS state unexpected'
-          # build; pipefail ensures a make failure fails the step
           make $MAKE_ARGS -j"$(nproc)" \
             KCFLAGS="-Wno-error -Wno-error=format -Wno-error=implicit-fallthrough" \
             2>&1 | tee build.log
@@ -88,7 +77,7 @@ jobs:
           sed -i 's|^is_slot_device=.*|is_slot_device=auto;|' anykernel.sh
           IMG=$(find "$KERNEL_DIR/out/arch/arm64/boot" -maxdepth 1 -name 'Image.gz' -print -quit)
           [ -n "$IMG" ] || IMG=$(find "$KERNEL_DIR/out/arch/arm64/boot" -maxdepth 1 -name 'Image' -print -quit)
-          [ -n "$IMG" ] || { echo 'ERROR: no Image.gz/Image to package'; ls -R "$KERNEL_DIR/out/arch/arm64/boot" | head; exit 1; }
+          [ -n "$IMG" ] || { echo 'ERROR: no Image.gz/Image to package'; exit 1; }
           cp "$IMG" "$GITHUB_WORKSPACE/anykernel/"
           zip -r9 "$GITHUB_WORKSPACE/AnyKernel3_SukiSU_sm6375.zip" . -x '*.zip' 'README*'
 
